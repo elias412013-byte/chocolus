@@ -1,0 +1,30 @@
+name: LaneLoader
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "12.0"
+targets:
+  LaneLoader:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: www
+        type: folder
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: LaneLoader
+        UIRequiresFullScreen: true
+        UIDeviceFamily: [2]
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.laneloader
+        TARGETED_DEVICE_FAMILY: "2"

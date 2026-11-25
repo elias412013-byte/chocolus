@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LaneLoader</title>
+<style>
+:root{--bg:#f3f5f2;--ink:#14201b;--mut:#5b6b64;--line:#c9d3cd;--acc:#0b7a5a;--card:#fff;--err:#b3261e}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1714;--ink:#e6efe9;--mut:#93a59c;--line:#27362f;--acc:#4fd1a5;--card:#16211c;--err:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,serif}
+main{max-width:720px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:28px;margin:0 0 4px}.sub{color:var(--mut);margin:0 0 20px}
+.row{display:flex;gap:8px;margin-bottom:10px}
+input[type=url]{flex:1;min-width:0;padding:12px;font:inherit;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink)}
+button,label.btn{padding:12px 16px;font:inherit;border:0;border-radius:6px;background:var(--acc);color:var(--bg);cursor:pointer;display:inline-block}
+label.btn input{display:none}
+#list{list-style:none;margin:20px 0;padding:0;border-top:1px solid var(--line)}
+#list li{padding:12px 4px;border-bottom:1px solid var(--line);cursor:pointer}
+#list b{display:block}#list span{color:var(--mut);font-size:14px}
+#detail{display:none;margin-top:20px;padding:16px;background:var(--card);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+#detail img{width:96px;height:96px;object-fit:cover;float:left;margin:0 14px 8px 0;border-radius:4px;background:var(--line)}
+#log{margin-top:16px;font:13px/1.6 Menlo,monospace;color:var(--mut);white-space:pre-wrap;word-break:break-word}
+#log .err{color:var(--err)}#log .ok{color:var(--acc)}
+#opts{display:none;margin-top:16px;padding:16px;background:var(--card);border:1px solid var(--line);border-radius:6px}
+.opt{display:grid;grid-template-columns:1fr auto;gap:6px 10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)}
+.opt input[type=range]{grid-column:1/-1;width:100%}
+.opt input[type=number],.opt select{padding:6px;font:inherit;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);width:96px}
+.opt span{color:var(--mut);font-size:14px}
+#opts button{margin-top:14px;width:100%}
+</style></head><body><main>
+<h1>LaneLoader</h1>
+<p class="sub">Abre un archivo .scp exportado desde Sonolus, o conéctate a un servidor.</p>
+<div class="row"><label class="btn">Importar .scp<input id="file" type="file"></label></div>
+<div class="row"><input id="url" type="url" placeholder="https://tu-servidor.ejemplo" autocapitalize="off" autocorrect="off"><button id="go">Conectar</button></div>
+<ul id="list"></ul><div id="detail"></div><div id="opts"></div><div id="log"></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+(function () {
+  var base = '', zip = null;
+  window.LANE = {};
+  function $(id) { return document.getElementById(id); }
+  function log(m, c) { var d = document.createElement('div'); d.className = c || ''; d.textContent = m; $('log').appendChild(d); }
+  function reset() { $('log').textContent = ''; $('list').textContent = ''; $('detail').style.display = 'none'; $('opts').style.display = 'none'; }
+  function abs(u) { return /^https?:/.test(u) ? u : base + (u.charAt(0) === '/' ? '' : '/') + u; }
+
+  // Busca un archivo dentro del .scp por ruta o, si no está, por hash.
+  function entry(u, hash) {
+    var p = u.replace(/^\/+/, '');
+    var f = zip.file(p) || zip.file(p + '.json');
+    if (!f && hash) { var m = zip.file(new RegExp(hash + '$')); f = m[0]; }
+    return f || null;
+  }
+  function getJSON(path) {
+    if (zip) {
+      var f = entry(path);
+      if (!f) return Promise.reject(new Error('No existe ' + path + ' dentro del .scp'));
+      return f.async('string').then(JSON.parse);
+    }
+    return fetch(abs(path)).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' en ' + path);
+      return r.json();
+    });
+  }
+  function getBytes(srl) {
+    if (zip) {
+      var f = entry(srl.url, srl.hash);
+      if (!f) return Promise.reject(new Error('Falta el recurso ' + srl.url));
+      return f.async('arraybuffer');
+    }
+    return fetch(abs(srl.url)).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.arrayBuffer();
+    });
+  }
+  function srlURL(srl) {
+    if (!zip) return Promise.resolve(abs(srl.url));
+    var f = entry(srl.url, srl.hash);
+    return f ? f.async('blob').then(function (b) { return URL.createObjectURL(b); }) : Promise.resolve('');
+  }
+  function getPacked(srl) {
+    return getBytes(srl).then(function (buf) {
+      var bytes = new Uint8Array(buf), text;
+      try { text = pako.inflate(bytes, { to: 'string' }); }
+      catch (e) { text = new TextDecoder('utf-8').decode(bytes); }
+      return { json: JSON.parse(text), size: buf.byteLength };
+    });
+  }
+  function fail(e) {
+    var m = String(e && e.message || e);
+    if (/Failed to fetch|Load failed|NetworkError/i.test(m)) m += '\nPosible CORS o servidor inaccesible.';
+    log(m, 'err');
+  }
+
+  function showList(res) {
+    var items = res.items || [];
+    log(items.length + ' niveles encontrados.', 'ok');
+    items.forEach(function (it) {
+      var li = document.createElement('li'), b = document.createElement('b'), s = document.createElement('span');
+      b.textContent = it.title;
+      s.textContent = it.artists + ' · ' + (it.engine && it.engine.title || '') + ' · nivel ' + it.rating;
+      li.appendChild(b); li.appendChild(s);
+      li.onclick = function () { loadLevel(it.name); };
+      $('list').appendChild(li);
+    });
+  }
+
+  function connect() {
+    base = $('url').value.replace(/\/+$/, ''); zip = null; reset();
+    if (!base) { log('Escribe la dirección del servidor.', 'err'); return; }
+    getJSON('/sonolus/info').then(function (i) { log('Servidor: ' + i.title, 'ok'); return getJSON('/sonolus/levels/list'); })
+      .then(showList).catch(fail);
+  }
+
+  function openScp(file) {
+    reset(); base = '';
+    log('Leyendo ' + file.name + ' …');
+    JSZip.loadAsync(file).then(function (z) {
+      zip = z;
+      return getJSON('/sonolus/levels/list');
+    }).then(showList).catch(fail);
+  }
+
+  var TXT = { '#SPEED': 'Velocidad de la música', '#NOTE_SPEED': 'Velocidad de notas', '#NOTE_SIZE': 'Tamaño de notas',
+    '#MILLISECOND_UNIT': ' ms', '#SECOND_UNIT': ' s', '#DEGREE_UNIT': '°' };
+  function label(t) {
+    if (!t) return '';
+    if (TXT[t]) return TXT[t];
+    if (/^#?note[ _]?speed$/i.test(t)) return 'Velocidad de las notas';
+    return t.charAt(0) === '#' ? t.slice(1).toLowerCase().replace(/_/g, ' ') : t;
+  }
+  function decimals(s) { var t = String(s), i = t.indexOf('.'); return i < 0 ? 0 : t.length - i - 1; }
+  function fmt(o, v) {
+    if (o.unit === '#PERCENTAGE_UNIT') return Math.round(v * 100) + '%';
+    return v.toFixed(decimals(o.step)) + (o.unit ? (TXT[o.unit] || ' ' + label(o.unit)) : '');
+  }
+  function snap(o, v) {
+    v = Math.min(o.max, Math.max(o.min, v));
+    v = o.min + Math.round((v - o.min) / o.step) * o.step;
+    return Math.min(o.max, +v.toFixed(Math.max(decimals(o.step), decimals(o.min))));
+  }
+  // Las opciones con "scope" se comparten entre niveles del mismo motor; las demás son por nivel.
+  function skey(o) { var L = window.LANE; return 'lane:' + L.level.engine.name + ':' + (o.scope || 'lvl:' + L.level.name) + ':' + o.name; }
+  function loadOpt(o) { try { var v = localStorage.getItem(skey(o)); if (v !== null) return +v; } catch (e) {} return o.def; }
+  function saveOpt(o, v) { try { localStorage.setItem(skey(o), String(v)); } catch (e) {} }
+
+  function showOptions(opts) {
+    var box = $('opts'), vals = [];
+    box.textContent = ''; box.style.display = 'block';
+    var h = document.createElement('b'); h.textContent = 'Configuración del nivel'; box.appendChild(h);
+    // La velocidad de las notas va primero. Es una heurística por nombre; el orden real del motor no cambia
+    // (los valores se entregan al motor por índice original).
+    var isNS = function (o) { return /note[ _]?speed/i.test(String(o.title || '') + ' ' + String(o.name || '')); };
+    var order = opts.map(function (o, i) { return i; }).sort(function (a, b) {
+      return (isNS(opts[b]) ? 1 : 0) - (isNS(opts[a]) ? 1 : 0) || a - b;
+    });
+    order.forEach(function (i) {
+      var o = opts[i];
+      var v = loadOpt(o); vals[i] = v;
+      var row = document.createElement('div'); row.className = 'opt';
+      var name = document.createElement('div'); name.textContent = label(o.title || o.name);
+      var out = document.createElement('span'); name.appendChild(document.createTextNode(' ')); name.appendChild(out);
+      row.appendChild(name);
+      if (o.type === 'slider') {
+        var r = document.createElement('input'); r.type = 'range'; r.min = o.min; r.max = o.max; r.step = o.step;
+        var n = document.createElement('input'); n.type = 'number'; n.min = o.min; n.max = o.max; n.step = o.step;
+        var set = function (x) { x = snap(o, +x); vals[i] = x; r.value = x; n.value = x; out.textContent = fmt(o, x); saveOpt(o, x); };
+        r.oninput = function () { set(r.value); };
+        n.onchange = function () { set(n.value); };
+        row.appendChild(n); row.appendChild(r); set(v);
+      } else if (o.type === 'toggle') {
+        var c = document.createElement('input'); c.type = 'checkbox'; c.checked = !!v;
+        c.onchange = function () { vals[i] = c.checked ? 1 : 0; saveOpt(o, vals[i]); };
+        row.appendChild(c);
+      } else if (o.type === 'select') {
+        var sel = document.createElement('select');
+        (o.values || []).forEach(function (t, k) { var op = document.createElement('option'); op.value = k; op.textContent = label(t); sel.appendChild(op); });
+        sel.value = v;
+        sel.onchange = function () { vals[i] = +sel.value; saveOpt(o, vals[i]); };
+        row.appendChild(sel);
+      }
+      box.appendChild(row);
+    });
+    var go = document.createElement('button'); go.textContent = 'Iniciar nivel';
+    go.onclick = function () {
+      window.LANE.options = vals;
+      if (window.LANE.start) window.LANE.start(vals);
+      else log('Opciones guardadas: [' + vals.join(', ') + ']. El reproductor todavía no existe, así que aún no hay nada que iniciar.', 'err');
+    };
+    box.appendChild(go);
+  }
+
+  function loadLevel(name) {
+    log('Cargando ' + name + ' …');
+    var level;
+    getJSON('/sonolus/levels/' + encodeURIComponent(name)).then(function (r) {
+      level = r.item || r;
+      return level.cover ? srlURL(level.cover) : '';
+    }).then(function (coverUrl) {
+      var d = $('detail'); d.textContent = '';
+      var img = document.createElement('img'); if (coverUrl) img.src = coverUrl;
+      var t = document.createElement('b'); t.textContent = level.title;
+      var p = document.createElement('div'); p.textContent = level.artists + ' — chart por ' + level.author;
+      d.appendChild(img); d.appendChild(t); d.appendChild(p); d.style.display = 'block';
+      return getPacked(level.data);
+    }).then(function (ld) {
+      window.LANE.level = level; window.LANE.levelData = ld.json;
+      log('Nivel: ' + (ld.json.entities || []).length + ' entidades, ' + Math.round(ld.size / 1024) + ' KB.', 'ok');
+      if (!level.engine || !level.engine.playData) throw new Error('El nivel no incluye los datos de juego del motor.');
+      return getPacked(level.engine.playData);
+    }).then(function (ed) {
+      window.LANE.engine = ed.json;
+      log('Motor: ' + (ed.json.nodes || []).length + ' nodos, ' + Math.round(ed.size / 1024) + ' KB.', 'ok');
+      if (!level.engine.configuration) return null;
+      return getPacked(level.engine.configuration);
+    }).then(function (cfg) {
+      if (!cfg) { log('El motor no trae configuración de opciones.', 'err'); return; }
+      showOptions(cfg.json.options || []);
+      log('Ajusta velocidad y opciones abajo. El intérprete de nodos todavía falta.', 'ok');
+    }).catch(fail);
+  }
+
+  $('go').onclick = connect;
+  $('url').onkeydown = function (e) { if (e.keyCode === 13) connect(); };
+  $('file').onchange = function () { if (this.files[0]) openScp(this.files[0]); };
+})();
+</script></body></html>
