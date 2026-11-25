@@ -1,0 +1,27 @@
+name: Build IPA
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Elegir el Xcode 16 más reciente
+        run: |
+          X=$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)
+          echo "Usando $X"
+          sudo xcode-select -s "$X"
+      - run: brew install xcodegen && xcodegen generate
+      - name: Compilar sin firmar
+        run: |
+          xcodebuild -project LaneLoader.xcodeproj -scheme LaneLoader \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/LaneLoader.app Payload/
+          zip -qr LaneLoader.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LaneLoader-ipa
+          path: LaneLoader.ipa
